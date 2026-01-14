@@ -1,0 +1,679 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Droplets, Sun, Scissors, Shovel, Trophy, Timer, Hand } from 'lucide-react';
+
+// ゲーム定数
+const TICK_RATE = 800; // 1日が進む速度 (ms)
+const MAX_DAYS = 100; // 収穫終了までの日数
+const MAX_WATER = 100;
+const MAX_FERTILIZER = 100;
+
+// ステージ定義
+const STAGES = {
+  SEED: { name: '種まき', threshold: 0 },
+  SPROUT: { name: '発芽', threshold: 5 },
+  GROWTH: { name: '成長期', threshold: 15 },
+  FLOWER: { name: '開花', threshold: 35 },
+  FRUIT: { name: '結実', threshold: 50 },
+  HARVEST: { name: '収穫期', threshold: 65 },
+};
+
+// 実・花がなる位置の定義（枝の先端座標に合わせる）
+// 枝の定義: start(100, y) -> control(100 + 30*dir, y-10) -> end(100 + 50*dir, y+10)
+const SLOT_POSITIONS = [
+  { id: 0, x: 50, y: 250, branchId: 1 },  // 下段左 (100-50, 240+10)
+  { id: 1, x: 150, y: 210, branchId: 2 }, // 下段右 (100+50, 200+10)
+  { id: 2, x: 50, y: 170, branchId: 3 },  // 中段左 (100-50, 160+10)
+  { id: 3, x: 150, y: 130, branchId: 4 }, // 中段右 (100+50, 120+10)
+  { id: 4, x: 100, y: 80, branchId: 0 },  // 頂点
+];
+
+// 植物描画コンポーネント
+const TomatoPlantSVG = ({ stage, size, sideShoots, slots, onHarvest }) => {
+  // 成長度合いに応じたスケール計算
+  const scale = 0.5 + (size / 100) * 0.5;
+  
+  // 枝の座標定義
+  const branches = [
+    { id: 1, x: 100, y: 240, dir: -1 }, // 左
+    { id: 2, x: 100, y: 200, dir: 1 },  // 右
+    { id: 3, x: 100, y: 160, dir: -1 }, // 左
+    { id: 4, x: 100, y: 120, dir: 1 },  // 右
+  ];
+
+  return (
+    <div className="relative w-full h-full flex items-end justify-center pointer-events-none">
+      <svg viewBox="0 0 200 300" className="w-full h-full drop-shadow-xl" style={{ overflow: 'visible' }}>
+        {/* 地面/ポット */}
+        <path d="M 40 280 L 160 280 L 150 300 L 50 300 Z" fill="#8B4513" />
+        <ellipse cx="100" cy="280" rx="60" ry="10" fill="#5D4037" />
+
+        {/* --- 成長段階ごとの描画 --- */}
+        
+        {/* 種まき期 */}
+        {stage.name === '種まき' && (
+          <circle cx="100" cy="280" r="3" fill="#F4A460" />
+        )}
+
+        {/* 発芽期以降 */}
+        {(stage.threshold >= STAGES.SPROUT.threshold) && (
+           <g transform={`translate(100, 280) scale(${Math.min(1.2, scale)}) translate(-100, -280)`}>
+             <path d="M 100 280 Q 100 260 100 250" stroke="#4CAF50" strokeWidth="4" fill="none" />
+             <path d="M 100 250 Q 80 240 80 250 Q 90 260 100 250" fill="#81C784" />
+             <path d="M 100 250 Q 120 240 120 250 Q 110 260 100 250" fill="#81C784" />
+           </g>
+        )}
+
+        {/* 成長期以降（本葉と茎） */}
+        {(stage.threshold >= STAGES.GROWTH.threshold) && (
+          <g transform={`translate(100, 280) scale(${Math.min(1.5, scale)}) translate(-100, -280)`}>
+            {/* メイン茎 */}
+            <path d="M 100 280 C 100 200 95 150 100 80" stroke="#388E3C" strokeWidth="6" fill="none" strokeLinecap="round" />
+            
+            {/* 枝と葉 */}
+            {branches.map((b, i) => (
+              <g key={b.id}>
+                {/* 枝：先端が (b.x + 50*dir, b.y + 10) になるように描画 */}
+                <path 
+                  d={`M ${b.x} ${b.y} Q ${b.x + (30 * b.dir)} ${b.y - 10} ${b.x + (50 * b.dir)} ${b.y + 10}`} 
+                  stroke="#4CAF50" strokeWidth="3" fill="none" 
+                />
+                {/* 葉：枝の先端につける */}
+                <path 
+                  d={`M ${b.x + (50 * b.dir)} ${b.y + 10} Q ${b.x + (70 * b.dir)} ${b.y} ${b.x + (50 * b.dir)} ${b.y + 20} Z`} 
+                  fill="#4CAF50" 
+                />
+                
+                {/* わき芽（摘芯対象） */}
+                {sideShoots > i && (
+                  <g className="animate-pulse origin-bottom">
+                     <path 
+                       d={`M ${b.x} ${b.y} Q ${b.x + (15 * b.dir)} ${b.y - 20} ${b.x + (20 * b.dir)} ${b.y - 30}`} 
+                       stroke="#8BC34A" strokeWidth="3" fill="none" 
+                     />
+                     <path 
+                       d={`M ${b.x + (20 * b.dir)} ${b.y - 30} Q ${b.x + (25 * b.dir)} ${b.y - 40} ${b.x + (15 * b.dir)} ${b.y - 35} Z`} 
+                       fill="#8BC34A" 
+                     />
+                     <circle cx={b.x + (10 * b.dir)} cy={b.y - 15} r="2" fill="red" className="animate-ping" opacity="0.5"/>
+                  </g>
+                )}
+              </g>
+            ))}
+            
+            {/* 花の描画（実はオーバーレイ） */}
+            {slots.map((slot, idx) => {
+              if (slot.state === 'flower') {
+                return (
+                  <g key={`flower-${idx}`} transform={`translate(${slot.x}, ${slot.y})`}>
+                    <circle r="6" fill="#FFEB3B" />
+                    <circle r="2" fill="#FFA000" />
+                    {[0, 60, 120, 180, 240, 300].map(deg => (
+                      <ellipse key={deg} cx="0" cy="-6" rx="2" ry="5" fill="#FFEB3B" transform={`rotate(${deg})`} />
+                    ))}
+                  </g>
+                );
+              }
+              if (slot.state === 'fruit') {
+                return (
+                   <g key={`stem-${idx}`} transform={`translate(${slot.x}, ${slot.y})`}>
+                      <path d="M 0 0 L 0 -5" stroke="#388E3C" strokeWidth="2" />
+                   </g>
+                );
+              }
+              return null;
+            })}
+          </g>
+        )}
+      </svg>
+      
+      {/* 実（React要素としてオーバーレイ表示してクリック可能にする） */}
+      {(stage.threshold >= STAGES.FLOWER.threshold) && (
+        <div className="absolute inset-0 pointer-events-none" style={{ 
+          transform: `translateY(10px) scale(${Math.min(1.5, scale)})`, 
+          transformOrigin: 'bottom center' 
+        }}>
+          {slots.map((slot) => {
+            if (slot.state !== 'fruit') return null;
+
+            const isHarvestable = slot.progress >= 90;
+            const isRipe = slot.progress >= 100;
+            
+            // サイズ計算
+            const maxPotentialSize = 50 + (slot.quality / 100) * 40;
+            const sizePx = 20 + (slot.progress / 100) * (maxPotentialSize - 20);
+
+            return (
+              <div key={slot.id} className="absolute" style={{ 
+                  left: `${slot.x}px`, 
+                  top: `${slot.y}px`,
+                  transform: 'translate(-50%, -50%)',
+                  zIndex: 10
+              }}>
+                {/* 収穫ヒント（完熟時のみ表示） */}
+                {isHarvestable && (
+                  <div className="absolute -top-10 left-1/2 transform -translate-x-1/2 flex flex-col items-center animate-bounce z-20 pointer-events-none whitespace-nowrap">
+                    <Hand size={24} className="text-white fill-orange-500 drop-shadow-md rotate-12" />
+                    <span className="text-[10px] font-bold text-white bg-black/60 px-1.5 py-0.5 rounded backdrop-blur-sm mt-0.5">Click!</span>
+                  </div>
+                )}
+
+                <button
+                  onClick={(e) => { 
+                    e.stopPropagation(); 
+                    onHarvest(slot.id); 
+                  }}
+                  className={`relative rounded-full shadow-lg transition-all duration-300 pointer-events-auto flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95`}
+                  style={{ 
+                    width: `${sizePx}px`, 
+                    height: `${sizePx}px`,
+                    // 赤くなるグラデーション
+                    backgroundColor: isRipe 
+                      ? `rgb(230, 40, 40)` 
+                      : `rgb(${120 + slot.progress}, ${200 - slot.progress}, ${100 - slot.progress/2})`,
+                    border: '1px solid rgba(0,0,0,0.1)',
+                  }}
+                >
+                  {/* ヘタ */}
+                  <div className="absolute -top-1 w-2/3 h-1/3 bg-green-700 rounded-full" 
+                       style={{clipPath: 'polygon(50% 0%, 20% 100%, 80% 100%)'}}></div>
+                  <div className="absolute -top-1 w-full h-1/3 bg-green-700" 
+                       style={{clipPath: 'polygon(50% 50%, 0% 0%, 100% 0%)', transform: 'rotate(180deg)'}}></div>
+
+                  {/* ツヤ */}
+                  <div className="absolute top-1/4 left-1/4 w-1/4 h-1/4 bg-white rounded-full opacity-40"></div>
+                  
+                  {/* 完熟時のキラキラ */}
+                  {isRipe && (
+                    <div className="absolute -right-1 -top-1 text-xs animate-bounce">✨</div>
+                  )}
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default function App() {
+  const [gameState, setGameState] = useState('start'); 
+  const [day, setDay] = useState(0);
+  const [score, setScore] = useState(0);
+  const [harvestedTomatoes, setHarvestedTomatoes] = useState([]);
+  
+  const [stats, setStats] = useState({
+    water: 50,
+    fertilizer: 50,
+    health: 100,
+    size: 0,
+    sideShoots: 0,
+    slots: SLOT_POSITIONS.map(p => ({ ...p, state: 'empty', progress: 0, quality: 50 }))
+  });
+
+  const [message, setMessage] = useState('トマト栽培を始めましょう！');
+  const [weather, setWeather] = useState('sunny'); 
+  const timerRef = useRef(null);
+
+  // ゲームループ
+  useEffect(() => {
+    if (gameState === 'playing') {
+      timerRef.current = setInterval(() => {
+        advanceDay();
+      }, TICK_RATE);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [gameState, stats, day]);
+
+  // 天気のエフェクト
+  useEffect(() => {
+    if (gameState === 'playing') {
+      const rand = Math.random();
+      if (rand < 0.6) setWeather('sunny');
+      else if (rand < 0.8) setWeather('cloudy');
+      else setWeather('rainy');
+    }
+  }, [day]);
+
+  // 天気に応じた背景スタイルを取得
+  const getWeatherBackground = () => {
+    switch(weather) {
+      case 'rainy':
+        return 'bg-gradient-to-b from-slate-700 via-slate-600 to-slate-800 border-slate-600';
+      case 'cloudy':
+        return 'bg-gradient-to-b from-gray-400 via-gray-300 to-gray-200 border-gray-400';
+      case 'sunny':
+      default:
+        return 'bg-gradient-to-b from-sky-400 via-sky-200 to-green-100 border-white';
+    }
+  };
+
+  const advanceDay = () => {
+    setDay((prev) => {
+      const newDay = prev + 1;
+      if (newDay >= MAX_DAYS) {
+        endGame();
+      }
+      return newDay;
+    });
+
+    setStats((prev) => {
+      let newWater = prev.water;
+      let newFertilizer = prev.fertilizer;
+      let newHealth = prev.health;
+      let newSize = prev.size;
+      let newSideShoots = prev.sideShoots;
+      
+      const isEndGameApproaching = MAX_DAYS - day < 15;
+
+      // 天候による水分変化
+      if (weather === 'sunny') newWater -= 5;
+      if (weather === 'rainy') newWater += 10;
+      if (weather === 'cloudy') newWater -= 2;
+
+      // 成長による消費
+      if (prev.size > 10) newFertilizer -= 2;
+      newWater -= prev.size * 0.1;
+
+      // わき芽の発生
+      if (!isEndGameApproaching && day > 25 && Math.random() < 0.08 && prev.sideShoots < 4) {
+        newSideShoots += 1;
+        setMessage('⚠️ わき芽が伸びてきました！早めに摘芯しましょう。');
+      }
+
+      // わき芽ペナルティ
+      if (newSideShoots > 0) {
+        newFertilizer -= newSideShoots * 3;
+        newSize += 0.1; 
+      } else {
+        if (newWater > 20 && newWater < 90 && newFertilizer > 20) {
+          newSize += 1;
+        }
+      }
+
+      // ステータス変動
+      if (newWater <= 0 || newWater >= 100) newHealth -= 10;
+      if (newFertilizer <= 0) newHealth -= 5;
+      if (newHealth < 100 && newWater > 30 && newWater < 80) newHealth += 2;
+
+      // スロット（花・実）の更新
+      let newSlots = prev.slots.map(slot => {
+        let newState = slot.state;
+        let newProgress = slot.progress;
+        let newQuality = slot.quality;
+
+        if (newState === 'flower') {
+          newProgress += 20; 
+          if (newProgress >= 100 || isEndGameApproaching) {
+             newState = 'fruit';
+             newProgress = 0;
+             setMessage('✨ 花が散って、小さな実がつきました！');
+          }
+        }
+        else if (newState === 'fruit') {
+           let growthRate = 2;
+           if (prev.sideShoots > 0) growthRate *= 0.5;
+           if (newHealth < 50) growthRate *= 0.5;
+
+           if (weather === 'sunny') newQuality += 1;
+           if (newFertilizer > 50) newQuality += 1;
+
+           if (isEndGameApproaching) {
+             growthRate = 15;
+           }
+
+           newProgress += growthRate;
+           
+           if (day === MAX_DAYS - 1) {
+             newProgress = 100;
+           }
+        }
+        
+        return {
+          ...slot,
+          state: newState,
+          progress: Math.min(100, newProgress),
+          quality: newQuality
+        };
+      });
+
+      // 新規開花
+      const emptySlots = newSlots.filter(s => s.state === 'empty');
+      if (!isEndGameApproaching && day > STAGES.FLOWER.threshold && emptySlots.length > 0) {
+        if (Math.random() < 0.2 && newHealth > 60) {
+          const targetSlotIndex = Math.floor(Math.random() * emptySlots.length);
+          const targetSlotId = emptySlots[targetSlotIndex].id;
+          
+          newSlots = newSlots.map(s => 
+            s.id === targetSlotId 
+              ? { ...s, state: 'flower', progress: 0, quality: 50 } 
+              : s
+          );
+          if(Math.random() < 0.5) setMessage('🌼 新しい花が咲きました！');
+        }
+      }
+
+      return {
+        water: Math.max(0, Math.min(100, newWater)),
+        fertilizer: Math.max(0, Math.min(100, newFertilizer)),
+        health: Math.max(0, Math.min(100, newHealth)),
+        size: newSize,
+        sideShoots: newSideShoots,
+        slots: newSlots
+      };
+    });
+  };
+
+  const startGame = () => {
+    setGameState('playing');
+    setDay(1);
+    setScore(0);
+    setHarvestedTomatoes([]);
+    setStats({
+      water: 60,
+      fertilizer: 80,
+      health: 100,
+      size: 1,
+      sideShoots: 0,
+      slots: SLOT_POSITIONS.map(p => ({ ...p, state: 'empty', progress: 0, quality: 50 }))
+    });
+    setMessage('種をまきました！まずは水切れに注意しましょう。');
+  };
+
+  const endGame = () => {
+    setGameState('result');
+    clearInterval(timerRef.current);
+  };
+
+  const handleWater = () => {
+    setStats(prev => ({ ...prev, water: Math.min(100, prev.water + 30) }));
+    setMessage('💧 水をあげました。');
+  };
+
+  const handleFertilize = () => {
+    setStats(prev => ({ ...prev, fertilizer: Math.min(100, prev.fertilizer + 40) }));
+    setMessage('💊 肥料を与えました。実が甘くなります！');
+  };
+
+  const handlePrune = () => {
+    if (stats.sideShoots > 0) {
+      setStats(prev => ({ ...prev, sideShoots: prev.sideShoots - 1 }));
+      setMessage('✂️ 摘芯しました！栄養が実に集中します。');
+    } else {
+      setMessage('今は摘芯の必要はありません。');
+    }
+  };
+
+  const handleHarvest = (slotId) => {
+    const slotIndex = stats.slots.findIndex(s => s.id === slotId);
+    if (slotIndex === -1) return;
+    
+    const slot = stats.slots[slotIndex];
+    if (slot.state !== 'fruit') return;
+
+    if (slot.progress < 90) {
+      setMessage('まだ青いです！赤くなるまで待ちましょう。');
+      return;
+    }
+
+    // 重さの計算
+    const weight = Math.floor((100 + (slot.quality / 2)) * (1 + (slot.quality / 200)));
+    const sugar = Math.floor(slot.quality / 10);
+    const fruitScore = weight * sugar;
+
+    setHarvestedTomatoes(prev => [...prev, { weight, sugar, score: fruitScore }]);
+    setScore(prev => prev + fruitScore);
+    
+    const newSlots = [...stats.slots];
+    newSlots[slotIndex] = { ...newSlots[slotIndex], state: 'empty', progress: 0, quality: 50 };
+    setStats(prev => ({ ...prev, slots: newSlots }));
+
+    setMessage(`🍅 収穫しました！ 重さ:${weight}g 糖度:${sugar}`);
+  };
+
+  const getCurrentStage = () => {
+    if (day >= STAGES.HARVEST.threshold) return STAGES.HARVEST;
+    if (day >= STAGES.FRUIT.threshold) return STAGES.FRUIT;
+    if (day >= STAGES.FLOWER.threshold) return STAGES.FLOWER;
+    if (day >= STAGES.GROWTH.threshold) return STAGES.GROWTH;
+    if (day >= STAGES.SPROUT.threshold) return STAGES.SPROUT;
+    return STAGES.SEED;
+  };
+
+  const currentStage = getCurrentStage();
+
+  const getStatusColor = (val, type) => {
+    if (type === 'water') {
+      if (val < 20 || val > 90) return 'bg-red-500';
+      if (val < 40 || val > 80) return 'bg-yellow-400';
+      return 'bg-blue-500';
+    }
+    if (val < 30) return 'bg-red-500';
+    if (val < 60) return 'bg-yellow-400';
+    return 'bg-green-500';
+  };
+
+  if (gameState === 'start') {
+    return (
+      <div className="min-h-screen bg-orange-50 flex flex-col items-center justify-center p-4 font-sans text-gray-800">
+        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center border-4 border-red-400">
+          <div className="mb-4 flex justify-center text-red-500">
+            <Trophy size={64} />
+          </div>
+          <h1 className="text-3xl font-bold mb-4 text-red-600">トマト栽培マスター</h1>
+          <p className="mb-6 text-gray-600">
+            種まきから収穫までの{MAX_DAYS}日間で、<br/>
+            最高のトマトを育てよう！
+          </p>
+          <div className="text-left bg-orange-100 p-4 rounded-lg mb-6 text-sm space-y-2">
+            <p>💧 <b>水やり</b>: 乾きすぎず、あげすぎず。</p>
+            <p>✂️ <b>摘芯</b>: 枝の付け根から出る不要な葉をカット！</p>
+            <p>🍅 <b>収穫</b>: 実が大きくなり赤くなったら<b>クリック</b>して収穫！</p>
+          </div>
+          <button 
+            onClick={startGame}
+            className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-xl text-xl transition transform hover:scale-105 shadow-lg"
+          >
+            栽培スタート！
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameState === 'result') {
+    const totalHarvest = harvestedTomatoes.length;
+    let rank = "見習い農家";
+    if (score > 5000) rank = "トマトの神様";
+    else if (score > 3000) rank = "マイスター";
+    else if (score > 1000) rank = "ベテラン農家";
+
+    return (
+      <div className="min-h-screen bg-green-50 flex flex-col items-center justify-center p-4 font-sans text-gray-800">
+        <div className="bg-white p-6 rounded-2xl shadow-xl max-w-md w-full text-center border-4 border-green-400 flex flex-col max-h-[90vh]">
+          <h2 className="text-2xl font-bold mb-2 flex-shrink-0">栽培終了！</h2>
+          <div className="text-6xl mb-2 flex-shrink-0">🏆</div>
+          <p className="text-lg text-gray-600 mb-1 flex-shrink-0">あなたのランク</p>
+          <p className="text-3xl font-bold text-green-600 mb-4 flex-shrink-0">{rank}</p>
+          
+          <div className="grid grid-cols-2 gap-4 mb-4 flex-shrink-0">
+            <div className="bg-gray-100 p-3 rounded-lg">
+              <p className="text-xs text-gray-500">総スコア</p>
+              <p className="text-xl font-bold">{score} pt</p>
+            </div>
+            <div className="bg-gray-100 p-3 rounded-lg">
+              <p className="text-xs text-gray-500">収穫数</p>
+              <p className="text-xl font-bold">{totalHarvest} 個</p>
+            </div>
+          </div>
+
+          <div className="text-left mb-4 flex-1 overflow-y-auto bg-gray-50 p-2 rounded border border-gray-200">
+             <h3 className="text-sm font-bold text-gray-600 mb-2 border-b pb-1">収穫レポート</h3>
+             {harvestedTomatoes.length === 0 ? (
+               <p className="text-xs text-gray-400 text-center py-4">収穫ゼロでした...</p>
+             ) : (
+               <table className="w-full text-xs">
+                 <thead className="text-gray-500">
+                   <tr>
+                     <th className="text-left font-normal pb-1">No.</th>
+                     <th className="text-right font-normal pb-1">重さ</th>
+                     <th className="text-right font-normal pb-1">糖度</th>
+                     <th className="text-right font-normal pb-1">スコア</th>
+                   </tr>
+                 </thead>
+                 <tbody>
+                   {harvestedTomatoes.map((t, i) => (
+                     <tr key={i} className="border-b border-gray-100 last:border-0">
+                       <td className="py-1">{i + 1}</td>
+                       <td className="text-right py-1">{t.weight}g</td>
+                       <td className="text-right py-1">{t.sugar}</td>
+                       <td className="text-right py-1 font-bold">{t.score}</td>
+                     </tr>
+                   ))}
+                 </tbody>
+                 <tfoot>
+                   <tr className="border-t border-gray-300">
+                     <td colSpan={3} className="text-right py-2 font-bold">合計:</td>
+                     <td className="text-right py-2 font-bold text-orange-600">{score}</td>
+                   </tr>
+                 </tfoot>
+               </table>
+             )}
+          </div>
+
+          <button 
+            onClick={() => setGameState('start')}
+            className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 rounded-xl transition flex-shrink-0"
+          >
+            もう一度遊ぶ
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-sky-100 flex flex-col items-center p-2 font-sans select-none overflow-hidden transition-colors duration-1000">
+      {/* ヘッダー情報 */}
+      <div className="w-full max-w-md bg-white rounded-xl shadow-md p-3 mb-2 flex justify-between items-center z-10">
+        <div className="flex items-center gap-2">
+          <div className="bg-gray-200 p-2 rounded-full">
+            <Timer size={20} className="text-gray-600"/>
+          </div>
+          <div>
+            <p className="text-xs text-gray-500">経過日数</p>
+            <p className="text-lg font-bold leading-none">{day} <span className="text-xs font-normal">/ {MAX_DAYS}日</span></p>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-gray-500">天気</p>
+          <div className="text-2xl leading-none">
+            {weather === 'sunny' ? '☀️' : weather === 'rainy' ? '🌧️' : '☁️'}
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-gray-500">スコア</p>
+          <p className="text-lg font-bold text-orange-600 leading-none">{score}</p>
+        </div>
+      </div>
+
+      {/* メインの植物表示エリア（天気に合わせて背景変化） */}
+      <div className={`relative flex-1 w-full max-w-md rounded-2xl shadow-inner border-4 mb-2 overflow-hidden flex flex-col items-center justify-end pb-8 transition-all duration-1000 ${getWeatherBackground()}`}>
+        
+        {/* メッセージトースト */}
+        <div className="absolute top-4 left-4 right-4 bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow text-center text-sm font-bold text-gray-700 animate-pulse z-20">
+          {message}
+        </div>
+
+        {/* 太陽/雨のエフェクト（位置調整：top-10 -> top-24） */}
+        <div className="absolute top-24 right-10 opacity-50 pointer-events-none z-10">
+           {weather === 'sunny' && <Sun size={64} className="text-yellow-400 animate-spin-slow" />}
+           {weather === 'rainy' && <div className="text-4xl animate-bounce">💧</div>}
+        </div>
+
+        {/* 植物の描画 (SVGコンポーネント化) */}
+        <div className="w-full h-full absolute bottom-0">
+          <TomatoPlantSVG 
+            stage={currentStage} 
+            size={stats.size} 
+            sideShoots={stats.sideShoots}
+            slots={stats.slots}
+            onHarvest={handleHarvest}
+          />
+        </div>
+
+        <div className="absolute bottom-2 text-green-900 font-bold opacity-50 pointer-events-none">
+           STAGE: {currentStage.name}
+        </div>
+      </div>
+
+      {/* ステータスバー */}
+      <div className="w-full max-w-md bg-white rounded-xl shadow p-4 mb-2 grid grid-cols-3 gap-4">
+        <div className="flex flex-col gap-1">
+          <div className="flex justify-between text-xs text-gray-500">
+            <span>水分</span>
+            <span>{Math.round(stats.water)}%</span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2.5">
+            <div className={`h-2.5 rounded-full transition-all duration-500 ${getStatusColor(stats.water, 'water')}`} style={{ width: `${stats.water}%` }}></div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <div className="flex justify-between text-xs text-gray-500">
+            <span>肥料</span>
+            <span>{Math.round(stats.fertilizer)}%</span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2.5">
+            <div className={`h-2.5 rounded-full transition-all duration-500 ${getStatusColor(stats.fertilizer, 'fert')}`} style={{ width: `${stats.fertilizer}%` }}></div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <div className="flex justify-between text-xs text-gray-500">
+            <span>元気</span>
+            <span>{Math.round(stats.health)}%</span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2.5">
+            <div className={`h-2.5 rounded-full transition-all duration-500 ${getStatusColor(stats.health, 'health')}`} style={{ width: `${stats.health}%` }}></div>
+          </div>
+        </div>
+      </div>
+
+      {/* 操作ボタン */}
+      <div className="w-full max-w-md grid grid-cols-3 gap-2 pb-4">
+        <button 
+          onClick={handleWater}
+          className="flex flex-col items-center justify-center bg-blue-500 active:bg-blue-600 text-white p-3 rounded-xl shadow-lg transition transform active:scale-95"
+        >
+          <Droplets className="mb-1" />
+          <span className="text-sm font-bold">水やり</span>
+        </button>
+
+        <button 
+          onClick={handleFertilize}
+          disabled={day < STAGES.GROWTH.threshold}
+          className={`flex flex-col items-center justify-center p-3 rounded-xl shadow-lg transition transform active:scale-95 ${
+            day < STAGES.GROWTH.threshold ? 'bg-gray-300 text-gray-500' : 'bg-amber-500 active:bg-amber-600 text-white'
+          }`}
+        >
+          <Shovel className="mb-1" />
+          <span className="text-sm font-bold">追肥</span>
+        </button>
+
+        <button 
+          onClick={handlePrune}
+          disabled={day < STAGES.GROWTH.threshold}
+          className={`relative flex flex-col items-center justify-center p-3 rounded-xl shadow-lg transition transform active:scale-95 ${
+            day < STAGES.GROWTH.threshold ? 'bg-gray-300 text-gray-500' : 'bg-green-600 active:bg-green-700 text-white'
+          }`}
+        >
+          {stats.sideShoots > 0 && (
+             <span className="absolute -top-2 -right-2 bg-red-500 text-white text-xs w-5 h-5 flex items-center justify-center rounded-full animate-bounce">!</span>
+          )}
+          <Scissors className="mb-1" />
+          <span className="text-sm font-bold">摘芯</span>
+        </button>
+      </div>
+
+    </div>
+  );
+}
